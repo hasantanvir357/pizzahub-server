@@ -68,6 +68,12 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
+    // Blocked accounts cannot sign in. Checked after the password match so the
+    // block status is never leaked for wrong credentials.
+    if (user.isBlocked === true) {
+      return res.status(403).json({ message: 'Your account has been blocked by Admin.' });
+    }
+
     const userPayload = {
       _id: user._id.toString(),
       name: user.name,

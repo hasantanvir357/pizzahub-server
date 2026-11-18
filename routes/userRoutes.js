@@ -19,12 +19,16 @@ router.get('/', verifyToken, verifyRole('admin'), async (req, res) => {
   }
 });
 
-// 2. Admin: Update User Role
+// 2. Admin: Update User Role (admins cannot demote themselves)
 router.patch('/:id/role', verifyToken, verifyRole('admin'), async (req, res) => {
   try {
     const { role } = req.body;
     if (!['customer', 'vendor', 'admin'].includes(role)) {
       return res.status(400).json({ message: 'Invalid role' });
+    }
+
+    if (String(req.user._id) === String(req.params.id)) {
+      return res.status(400).json({ message: 'Admins cannot change their own role' });
     }
 
     await usersCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { role } });
@@ -34,7 +38,38 @@ router.patch('/:id/role', verifyToken, verifyRole('admin'), async (req, res) => 
   }
 });
 
-// 3. Any Logged-in User: Update Own Profile
+// 3. Admin: Block / Unblock a User (admins cannot block themselves)
+router.patch('/:id/block', verifyToken, verifyRole('admin'), async (req, res) => {
+  try {
+    const { isBlocked } = req.body;
+    if (typeof isBlocked !== 'boolean') {
+      return res.status(400).json({ message: 'isBlocked must be a boolean' });
+    }
+
+    if (String(req.user._id) === String(req.params.id)) {
+      return res.status(400).json({ message: 'Admins cannot block themselves' });
+    }
+
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user id' });
+    }
+
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { isBlocked } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({ message: isBlocked ? 'User blocked' : 'User unblocked', isBlocked });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update block status' });
+  }
+});
+
+// 4. Any Logged-in User: Update Own Profile
 router.patch('/profile', verifyToken, async (req, res) => {
   try {
     const { name, restaurantName, image } = req.body;

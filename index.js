@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
 import { connectDB } from './config/db.js';
+import authRoutes from './routes/authRoutes.js';
+import menuRoutes from './routes/menuRoutes.js';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -16,6 +18,10 @@ app.use(express.json());
 
 // Connect to MongoDB
 connectDB();
+
+// API Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/menu', menuRoutes);
 
 app.get('/', (req, res) => {
   res.send('PizzaHub Server is running!');

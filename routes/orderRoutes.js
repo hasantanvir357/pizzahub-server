@@ -37,7 +37,10 @@ router.post('/', verifyToken, async (req, res) => {
       return res.status(403).json({ message: 'Only Customer accounts can place orders.' });
     }
 
-    const { menuId, quantity, size, deliveryAddress, phone, paymentMethod } = req.body;
+    const { menuId, quantity, size, paymentMethod } = req.body;
+    // Accept either field name from the client for contact and delivery details.
+    const deliveryAddress = req.body.deliveryAddress || req.body.address;
+    const phone = req.body.phone || req.body.customerPhone;
 
     if (!menuId || !quantity || !deliveryAddress || !phone) {
       return res.status(400).json({ message: 'Please fill all delivery and order fields' });

@@ -37,35 +37,54 @@ router.post('/', verifyToken, async (req, res) => {
       return res.status(403).json({ message: 'Only Customer accounts can place orders.' });
     }
 
-    const { menuId, quantity, size, paymentMethod } = req.body;
-    // Accept either field name from the client for contact and delivery details.
+    const { quantity, size, paymentMethod } = req.body;
+    // Accept any of the field names used by the different clients.
+    const menuId = req.body.menuId || req.body.menuItemId || req.body.pizzaId;
     const deliveryAddress = req.body.deliveryAddress || req.body.address;
     const phone = req.body.phone || req.body.customerPhone;
+    const bodyTotalPrice = req.body.totalPrice ?? req.body.price;
 
     if (!menuId || !quantity || !deliveryAddress || !phone) {
       return res.status(400).json({ message: 'Please fill all delivery and order fields' });
     }
 
+    if (!ObjectId.isValid(menuId)) {
+      return res.status(400).json({ message: 'Invalid menu item id' });
+    }
+
     const menuItem = await menuItemsCollection.findOne({ _id: new ObjectId(menuId) });
-    if (!menuItem) {
+
+    // Prefer details supplied by the client; otherwise look them up by menu ID.
+    const pizzaName = req.body.pizzaName || req.body.name || menuItem?.name;
+    const pizzaImage = req.body.pizzaImage || req.body.image || menuItem?.image;
+
+    if (!pizzaName || !pizzaImage) {
       return res.status(404).json({ message: 'Menu item not found' });
     }
 
     const qty = Math.max(1, parseInt(quantity, 10));
     const sizeMultiplier = size === 'Large' ? 1.4 : size === 'Medium' ? 1.2 : 1;
-    const totalPrice = Number((menuItem.price * sizeMultiplier * qty).toFixed(2));
+    const computedTotal = menuItem?.price != null
+      ? Number((menuItem.price * sizeMultiplier * qty).toFixed(2))
+      : 0;
+    const parsedBodyTotal = Number(bodyTotalPrice);
+    // Use the client's total when supplied (and valid), else compute it from the menu price.
+    const totalPrice =
+      bodyTotalPrice != null && bodyTotalPrice !== '' && Number.isFinite(parsedBodyTotal)
+        ? Number(parsedBodyTotal.toFixed(2))
+        : computedTotal;
 
-    const vendorId = await resolveVendorId(menuItem);
+    const vendorId = menuItem ? await resolveVendorId(menuItem) : req.body.vendorId || null;
 
     const newOrder = {
       customerId: req.user._id,
       customerName: req.user.name,
       customerEmail: req.user.email,
       vendorId,
-      restaurantName: menuItem.restaurantName,
-      menuId: menuItem._id.toString(),
-      pizzaName: menuItem.name,
-      pizzaImage: menuItem.image,
+      restaurantName: menuItem?.restaurantName || req.body.restaurantName || null,
+      menuId: menuItem ? menuItem._id.toString() : menuId,
+      pizzaName,
+      pizzaImage,
       size: size || 'Regular',
       quantity: qty,
       totalPrice,

@@ -6,6 +6,29 @@ import { verifyRole } from '../middlewares/verifyRole.js';
 
 const router = express.Router();
 
+// Seeded menu items can lack a `vendorId` — resolve the owning vendor through
+// their `restaurantName` so every order is linked to the right kitchen.
+async function resolveVendorId(menuItem) {
+  if (menuItem.vendorId) return String(menuItem.vendorId);
+  if (!menuItem.restaurantName) return null;
+
+  const vendor = await usersCollection.findOne({
+    restaurantName: menuItem.restaurantName,
+    role: 'vendor',
+  });
+  return vendor ? vendor._id.toString() : null;
+}
+
+// Vendor order lookup: matches by `vendorId` and also legacy orders that were
+// saved without one and only carry the restaurant name.
+function vendorOrdersQuery(user) {
+  const or = [{ vendorId: user._id }];
+  if (user.restaurantName) {
+    or.push({ restaurantName: user.restaurantName, vendorId: null });
+  }
+  return { $or: or };
+}
+
 // 1. Customer: Place New Order & Record Transaction
 router.post('/', verifyToken, async (req, res) => {
   try {
@@ -24,11 +47,13 @@ router.post('/', verifyToken, async (req, res) => {
     const sizeMultiplier = size === 'Large' ? 1.4 : size === 'Medium' ? 1.2 : 1;
     const totalPrice = Number((menuItem.price * sizeMultiplier * qty).toFixed(2));
 
+    const vendorId = await resolveVendorId(menuItem);
+
     const newOrder = {
       customerId: req.user._id,
       customerName: req.user.name,
       customerEmail: req.user.email,
-      vendorId: menuItem.vendorId,
+      vendorId,
       restaurantName: menuItem.restaurantName,
       menuId: menuItem._id.toString(),
       pizzaName: menuItem.name,
@@ -49,7 +74,7 @@ router.post('/', verifyToken, async (req, res) => {
       orderId: orderResult.insertedId.toString(),
       customerId: req.user._id,
       customerEmail: req.user.email,
-      vendorId: menuItem.vendorId,
+      vendorId,
       amount: totalPrice,
       paymentMethod: paymentMethod || 'Cash on Delivery',
       transactionId: `TXN-${Date.now()}`,
@@ -82,7 +107,9 @@ router.get('/my-orders', verifyToken, async (req, res) => {
 // 3. Vendor: Get Incoming Orders for Vendor's Kitchen
 router.get('/vendor-orders', verifyToken, verifyRole('vendor', 'admin'), async (req, res) => {
   try {
-    const query = req.user.role === 'admin' ? {} : { vendorId: req.user._id };
+    // Legacy orders saved without a vendorId are still matched through the
+    // restaurant name, so vendors always see every order on their items.
+    const query = req.user.role === 'admin' ? {} : vendorOrdersQuery(req.user);
     const orders = await ordersCollection.find(query).sort({ createdAt: -1 }).toArray();
     res.json({ orders });
   } catch (error) {
@@ -93,15 +120,69 @@ router.get('/vendor-orders', verifyToken, verifyRole('vendor', 'admin'), async (
 // 4. Vendor / Admin: Update Order Status
 router.patch('/:id/status', verifyToken, verifyRole('vendor', 'admin'), async (req, res) => {
   try {
-    const { status } = req.body;
-    await ordersCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { status } });
+    const { status, cancelReason } = req.body;
+    const update = { status };
+
+    if (status === 'cancelled') {
+      update.cancelReason = cancelReason || 'Cancelled by the kitchen';
+      update.cancelledBy = req.user.role;
+    }
+
+    await ordersCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: update });
     res.json({ message: `Order status updated to ${status}` });
   } catch (error) {
     res.status(500).json({ message: 'Failed to update order status' });
   }
 });
 
-// 5. Role-Based Dashboard Overview Stats & Chart Data
+// 5. Customer (own pending order) / Vendor / Admin: Cancel Order
+router.patch('/:id/cancel', verifyToken, async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid order id' });
+    }
+
+    const order = await ordersCollection.findOne({ _id: new ObjectId(req.params.id) });
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    if (order.status === 'cancelled') {
+      return res.status(400).json({ message: 'Order is already cancelled' });
+    }
+
+    const isCustomer = String(order.customerId) === String(req.user._id);
+    const isVendor = order.vendorId != null && String(order.vendorId) === String(req.user._id);
+    const isAdmin = req.user.role === 'admin';
+
+    if (!isAdmin && !isVendor && !isCustomer) {
+      return res.status(403).json({ message: 'Not authorized to cancel this order' });
+    }
+
+    // Customers may only cancel while the order is still pending.
+    if (!isAdmin && !isVendor && order.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending orders can be cancelled' });
+    }
+
+    const { cancelReason } = req.body;
+    await ordersCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      {
+        $set: {
+          status: 'cancelled',
+          cancelReason: cancelReason || 'No reason provided',
+          cancelledBy: req.user.role,
+        },
+      }
+    );
+
+    res.json({ message: 'Order cancelled successfully', status: 'cancelled' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to cancel order', error: error.message });
+  }
+});
+
+// 6. Role-Based Dashboard Overview Stats & Chart Data
 router.get('/dashboard-stats', verifyToken, async (req, res) => {
   try {
     const role = req.user.role;
@@ -128,7 +209,7 @@ router.get('/dashboard-stats', verifyToken, async (req, res) => {
     if (role === 'vendor') {
       const [myMenus, myOrders] = await Promise.all([
         menuItemsCollection.countDocuments({ vendorId: req.user._id }),
-        ordersCollection.find({ vendorId: req.user._id }).sort({ createdAt: -1 }).toArray(),
+        ordersCollection.find(vendorOrdersQuery(req.user)).sort({ createdAt: -1 }).toArray(),
       ]);
       const totalEarnings = myOrders.reduce((sum, o) => sum + (o.totalPrice || 0), 0);
 

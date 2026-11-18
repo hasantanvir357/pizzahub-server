@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
 import { connectDB } from './config/db.js';
+import { seedMenuIfEmpty } from './utils/seedMenu.js';
 import authRoutes from './routes/authRoutes.js';
 import menuRoutes from './routes/menuRoutes.js';
 import orderRoutes from './routes/orderRoutes.js';
@@ -18,8 +19,10 @@ app.use(
 );
 app.use(express.json());
 
-// Connect to MongoDB
-connectDB();
+// Connect to MongoDB & Seed 12 Initial Menu Items
+connectDB().then(() => {
+  seedMenuIfEmpty();
+});
 
 // API Routes
 app.use('/api/auth', authRoutes);

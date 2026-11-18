@@ -32,6 +32,11 @@ function vendorOrdersQuery(user) {
 // 1. Customer: Place New Order & Record Transaction
 router.post('/', verifyToken, async (req, res) => {
   try {
+    // Only customers are allowed to place orders.
+    if (req.user.role !== 'customer') {
+      return res.status(403).json({ message: 'Only Customer accounts can place orders.' });
+    }
+
     const { menuId, quantity, size, deliveryAddress, phone, paymentMethod } = req.body;
 
     if (!menuId || !quantity || !deliveryAddress || !phone) {
@@ -209,7 +214,10 @@ router.get('/dashboard-stats', verifyToken, async (req, res) => {
     if (role === 'vendor') {
       const [myMenus, myOrders] = await Promise.all([
         menuItemsCollection.countDocuments({ vendorId: req.user._id }),
-        ordersCollection.find(vendorOrdersQuery(req.user)).sort({ createdAt: -1 }).toArray(),
+        ordersCollection
+          .find({ ...vendorOrdersQuery(req.user), hiddenForVendor: { $ne: true } })
+          .sort({ createdAt: -1 })
+          .toArray(),
       ]);
       const totalEarnings = myOrders.reduce((sum, o) => sum + (o.totalPrice || 0), 0);
 
@@ -224,8 +232,11 @@ router.get('/dashboard-stats', verifyToken, async (req, res) => {
       });
     }
 
-    // Customer Stats
-    const myOrders = await ordersCollection.find({ customerId: req.user._id }).sort({ createdAt: -1 }).toArray();
+    // Customer Stats — history logs hidden by the customer stay excluded.
+    const myOrders = await ordersCollection
+      .find({ customerId: req.user._id, hiddenForCustomer: { $ne: true } })
+      .sort({ createdAt: -1 })
+      .toArray();
     const totalSpent = myOrders.reduce((sum, o) => sum + (o.totalPrice || 0), 0);
 
     res.json({
@@ -238,6 +249,83 @@ router.get('/dashboard-stats', verifyToken, async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to load dashboard stats' });
+  }
+});
+
+// 7. Role-Specific History Log Deletion (single entry)
+router.delete('/history/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid order id' });
+    }
+
+    const order = await ordersCollection.findOne({ _id: new ObjectId(id) });
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const role = req.user.role;
+
+    // Admins remove the log entirely.
+    if (role === 'admin') {
+      await ordersCollection.deleteOne({ _id: new ObjectId(id) });
+      return res.json({ message: 'Order removed from history' });
+    }
+
+    // Vendors hide the log from their own history only.
+    if (role === 'vendor') {
+      await ordersCollection.updateOne({ _id: new ObjectId(id) }, { $set: { hiddenForVendor: true } });
+      return res.json({ message: 'Order removed from your history' });
+    }
+
+    // Customers can only hide their own logs.
+    if (String(order.customerId) !== String(req.user._id)) {
+      return res.status(403).json({ message: 'Not authorized to remove this order from history' });
+    }
+
+    await ordersCollection.updateOne({ _id: new ObjectId(id) }, { $set: { hiddenForCustomer: true } });
+    res.json({ message: 'Order removed from your history' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to delete order history log', error: error.message });
+  }
+});
+
+// 8. Role-Specific History Log Clearing (all entries for the current role)
+router.delete('/history', verifyToken, async (req, res) => {
+  try {
+    const role = req.user.role;
+
+    // Admins clear completed / cancelled logs permanently.
+    if (role === 'admin') {
+      const result = await ordersCollection.deleteMany({
+        status: { $in: ['completed', 'delivered', 'cancelled'] },
+      });
+      return res.json({
+        message: 'Completed and cancelled order logs cleared',
+        deletedCount: result.deletedCount || 0,
+      });
+    }
+
+    // Vendors hide every log on their kitchen's orders.
+    if (role === 'vendor') {
+      const result = await ordersCollection.updateMany(vendorOrdersQuery(req.user), {
+        $set: { hiddenForVendor: true },
+      });
+      return res.json({
+        message: 'Order history cleared',
+        modifiedCount: result.modifiedCount || 0,
+      });
+    }
+
+    // Customers hide every log of their own orders.
+    const result = await ordersCollection.updateMany(
+      { customerId: req.user._id },
+      { $set: { hiddenForCustomer: true } }
+    );
+    res.json({ message: 'Order history cleared', modifiedCount: result.modifiedCount || 0 });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to clear order history', error: error.message });
   }
 });
 

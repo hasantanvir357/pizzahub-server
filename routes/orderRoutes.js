@@ -30,96 +30,111 @@ function vendorOrdersQuery(user) {
 }
 
 // 1. Customer: Place New Order & Record Transaction
-router.post('/', verifyToken, async (req, res) => {
-  try {
-    // Only customers are allowed to place orders.
-    if (req.user.role !== 'customer') {
-      return res.status(403).json({ message: 'Only Customer accounts can place orders.' });
+// Unauthenticated requests are rejected with a customer-specific 401 before
+// the bearer token is verified; only customer accounts may place orders.
+router.post(
+  '/',
+  async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Please sign in as a customer to place an order.' });
     }
+    next();
+  },
+  verifyToken,
+  async (req, res) => {
+    try {
+      // Only customers are allowed to place orders.
+      if (req.user.role !== 'customer') {
+        return res.status(403).json({
+          message: 'Only Customer accounts can place orders. Vendors and Admins cannot place food orders.',
+        });
+      }
 
-    const { quantity, size, paymentMethod } = req.body;
-    // Accept any of the field names used by the different clients.
-    const menuId = req.body.menuId || req.body.menuItemId || req.body.pizzaId;
-    const deliveryAddress = req.body.deliveryAddress || req.body.address;
-    const phone = req.body.phone || req.body.customerPhone;
-    const bodyTotalPrice = req.body.totalPrice ?? req.body.price;
+      const { quantity, size, paymentMethod } = req.body;
+      // Accept any of the field names used by the different clients.
+      const menuId = req.body.menuId || req.body.menuItemId || req.body.pizzaId;
+      const deliveryAddress = req.body.deliveryAddress || req.body.address;
+      const phone = req.body.phone || req.body.customerPhone;
+      const bodyTotalPrice = req.body.totalPrice ?? req.body.price;
 
-    if (!menuId || !quantity || !deliveryAddress || !phone) {
-      return res.status(400).json({ message: 'Please fill all delivery and order fields' });
+      if (!menuId || !quantity || !deliveryAddress || !phone) {
+        return res.status(400).json({ message: 'Please fill all delivery and order fields' });
+      }
+
+      if (!ObjectId.isValid(menuId)) {
+        return res.status(400).json({ message: 'Invalid menu item id' });
+      }
+
+      const menuItem = await menuItemsCollection.findOne({ _id: new ObjectId(menuId) });
+
+      // Prefer details supplied by the client; otherwise look them up by menu ID.
+      const pizzaName = req.body.pizzaName || req.body.name || menuItem?.name;
+      const pizzaImage = req.body.pizzaImage || req.body.image || menuItem?.image;
+
+      if (!pizzaName || !pizzaImage) {
+        return res.status(404).json({ message: 'Menu item not found' });
+      }
+
+      const qty = Math.max(1, parseInt(quantity, 10));
+      const sizeMultiplier = size === 'Large' ? 1.4 : size === 'Medium' ? 1.2 : 1;
+      const computedTotal = menuItem?.price != null
+        ? Number((menuItem.price * sizeMultiplier * qty).toFixed(2))
+        : 0;
+      const parsedBodyTotal = Number(bodyTotalPrice);
+      // Use the client's total when supplied (and valid), else compute it from the menu price.
+      const totalPrice =
+        bodyTotalPrice != null && bodyTotalPrice !== '' && Number.isFinite(parsedBodyTotal)
+          ? Number(parsedBodyTotal.toFixed(2))
+          : computedTotal;
+
+      const vendorId = menuItem ? await resolveVendorId(menuItem) : req.body.vendorId || null;
+
+      const newOrder = {
+        customerId: req.user._id,
+        customerName: req.user.name,
+        customerEmail: req.user.email,
+        vendorId,
+        restaurantName: menuItem?.restaurantName || req.body.restaurantName || null,
+        menuId: menuItem ? menuItem._id.toString() : menuId,
+        pizzaName,
+        pizzaImage,
+        size: size || 'Regular',
+        quantity: qty,
+        totalPrice,
+        deliveryAddress,
+        phone,
+        status: 'pending', // pending -> preparing -> delivered -> cancelled
+        createdAt: new Date(),
+      };
+
+      const orderResult = await ordersCollection.insertOne(newOrder);
+
+      // Record Payment / Transaction
+      const transaction = {
+        orderId: orderResult.insertedId.toString(),
+        customerId: req.user._id,
+        customerEmail: req.user.email,
+        vendorId,
+        amount: totalPrice,
+        paymentMethod: paymentMethod || 'Cash on Delivery',
+        transactionId: `TXN-${Date.now()}`,
+        status: paymentMethod === 'Card / Online' ? 'paid' : 'pending',
+        createdAt: new Date(),
+      };
+
+      await transactionsCollection.insertOne(transaction);
+
+      res.status(201).json({
+        message: 'Order placed successfully!',
+        orderId: orderResult.insertedId,
+        transactionId: transaction.transactionId,
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to place order', error: error.message });
     }
-
-    if (!ObjectId.isValid(menuId)) {
-      return res.status(400).json({ message: 'Invalid menu item id' });
-    }
-
-    const menuItem = await menuItemsCollection.findOne({ _id: new ObjectId(menuId) });
-
-    // Prefer details supplied by the client; otherwise look them up by menu ID.
-    const pizzaName = req.body.pizzaName || req.body.name || menuItem?.name;
-    const pizzaImage = req.body.pizzaImage || req.body.image || menuItem?.image;
-
-    if (!pizzaName || !pizzaImage) {
-      return res.status(404).json({ message: 'Menu item not found' });
-    }
-
-    const qty = Math.max(1, parseInt(quantity, 10));
-    const sizeMultiplier = size === 'Large' ? 1.4 : size === 'Medium' ? 1.2 : 1;
-    const computedTotal = menuItem?.price != null
-      ? Number((menuItem.price * sizeMultiplier * qty).toFixed(2))
-      : 0;
-    const parsedBodyTotal = Number(bodyTotalPrice);
-    // Use the client's total when supplied (and valid), else compute it from the menu price.
-    const totalPrice =
-      bodyTotalPrice != null && bodyTotalPrice !== '' && Number.isFinite(parsedBodyTotal)
-        ? Number(parsedBodyTotal.toFixed(2))
-        : computedTotal;
-
-    const vendorId = menuItem ? await resolveVendorId(menuItem) : req.body.vendorId || null;
-
-    const newOrder = {
-      customerId: req.user._id,
-      customerName: req.user.name,
-      customerEmail: req.user.email,
-      vendorId,
-      restaurantName: menuItem?.restaurantName || req.body.restaurantName || null,
-      menuId: menuItem ? menuItem._id.toString() : menuId,
-      pizzaName,
-      pizzaImage,
-      size: size || 'Regular',
-      quantity: qty,
-      totalPrice,
-      deliveryAddress,
-      phone,
-      status: 'pending', // pending -> preparing -> delivered -> cancelled
-      createdAt: new Date(),
-    };
-
-    const orderResult = await ordersCollection.insertOne(newOrder);
-
-    // Record Payment / Transaction
-    const transaction = {
-      orderId: orderResult.insertedId.toString(),
-      customerId: req.user._id,
-      customerEmail: req.user.email,
-      vendorId,
-      amount: totalPrice,
-      paymentMethod: paymentMethod || 'Cash on Delivery',
-      transactionId: `TXN-${Date.now()}`,
-      status: paymentMethod === 'Card / Online' ? 'paid' : 'pending',
-      createdAt: new Date(),
-    };
-
-    await transactionsCollection.insertOne(transaction);
-
-    res.status(201).json({
-      message: 'Order placed successfully!',
-      orderId: orderResult.insertedId,
-      transactionId: transaction.transactionId,
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Failed to place order', error: error.message });
   }
-});
+);
 
 // 2. Customer: Get My Orders
 router.get('/my-orders', verifyToken, async (req, res) => {

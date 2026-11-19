@@ -80,9 +80,11 @@ connectDB().then(() => {
   seedMenuIfEmpty();
 });
 
-// API Routes
+// API Routes — registered unconditionally at module load so they exist in
+// both local dev AND Vercel production (only app.listen below is gated).
 app.use('/api/auth', authRoutes);
-app.use('/api/menu', menuRoutes);
+app.use('/api/menus', menuRoutes);
+app.use('/api/menu', menuRoutes); // keep the singular path working for existing callers
 app.use('/api/orders', orderRoutes);
 app.use('/api/users', userRoutes);
 
@@ -90,9 +92,11 @@ app.get('/', (req, res) => {
   res.send('PizzaHub Server is running!');
 });
 
-// Only bind the port during local development; on Vercel the serverless
-// function handles requests via `export default app` and must not call listen().
-if (process.env.NODE_ENV !== 'production') {
+// ONLY the port bind is gated — DB init (connectDB) and all route
+// registrations above run unconditionally at module load, so they execute in
+// local dev AND Vercel production. On Vercel, `export default app` serves
+// requests; calling listen() there would make the serverless function hang.
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`Server is running on port: ${port}`);
   });

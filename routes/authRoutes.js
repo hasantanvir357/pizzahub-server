@@ -23,7 +23,11 @@ router.post('/register', async (req, res) => {
     if (existingUser) {
       return res.status(409).json({ message: 'Email already registered' });
     }
-
+    if (!password || password.length < 6 || !/[A-Z]/.test(password) || !/[a-z]/.test(password)) {
+      return res
+        .status(400)
+        .json({ message: 'Password must be at least 6 characters with 1 uppercase and 1 lowercase letter.' });
+    }
     const hashedPassword = await bcrypt.hash(password, 10);
     const newUser = {
       name,
@@ -45,7 +49,7 @@ router.post('/register', async (req, res) => {
       image: newUser.image,
     };
 
-    const token = jwt.sign(userPayload, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign(userPayload, process.env.JWT_SECRET, { expiresIn: '30d' });
 
     res.status(201).json({ token, user: userPayload });
   } catch (error) {

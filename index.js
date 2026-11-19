@@ -11,15 +11,44 @@ import orderRoutes from './routes/orderRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 
 const app = express();
+
+// CORS must be the very first middleware — before any other middleware,
+// webhook, or route — so every response (incl. preflight/404) carries the
+// correct headers in local dev AND on Vercel.
+app.use(cors({ origin: true, credentials: true }));
+
 const port = process.env.PORT || 5000;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
-app.use(
-  cors({
-    origin: true,
-    credentials: true,
-  })
-);
+// Cached MongoDB connection promise. connectDB() is invoked at most once per
+// process; warm serverless invocations await the same promise instead of
+// reconnecting on every request.
+let cachedClient = null;
+
+function ensureDbConnection() {
+  if (!cachedClient) {
+    cachedClient = connectDB().catch((err) => {
+      cachedClient = null; // don't cache failures — let the next request retry
+      throw err;
+    });
+  }
+  return cachedClient;
+}
+
+// Await the (cached) MongoDB connection BEFORE any /api/* route handler runs.
+// On a cold serverless start this guarantees the DB pool is ready before the
+// auth/menu/order/user controllers execute; failures return 503 instead of
+// letting routes hang.
+app.use(async (req, res, next) => {
+  if (!req.path.startsWith('/api/')) return next();
+  try {
+    await ensureDbConnection();
+    next();
+  } catch (err) {
+    console.error('MongoDB connection failed:', err.message);
+    res.status(503).json({ message: 'Database unavailable' });
+  }
+});
 
 // Stripe Webhook: mounted BEFORE express.json() so the raw request body is
 // preserved for signature verification via the Stripe-Signature header.
@@ -75,10 +104,12 @@ app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async
 
 app.use(express.json());
 
-// Connect to MongoDB & Seed 12 Initial Menu Items
-connectDB().then(() => {
-  seedMenuIfEmpty();
-});
+// Connect to MongoDB & Seed 12 Initial Menu Items — runs unconditionally at
+// startup (local dev AND Vercel) through the SAME cached promise the /api
+// middleware awaits, so connectDB() never opens a second connection.
+ensureDbConnection()
+  .then(() => seedMenuIfEmpty())
+  .catch((err) => console.error('Initial MongoDB connection failed:', err.message));
 
 // API Routes — registered unconditionally at module load so they exist in
 // both local dev AND Vercel production (only app.listen below is gated).

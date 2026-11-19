@@ -1,6 +1,6 @@
 import express from 'express';
 import { ObjectId } from 'mongodb';
-import { menuItemsCollection } from '../config/db.js';
+import { menuItemsCollection, usersCollection } from '../config/db.js';
 import { verifyToken } from '../middlewares/verifyToken.js';
 import { verifyRole } from '../middlewares/verifyRole.js';
 
@@ -55,6 +55,23 @@ router.post('/', verifyToken, verifyRole('vendor', 'admin'), async (req, res) =>
     const { name, description, price, category, image, toppings } = req.body;
     if (!name || !price || !category || !image) {
       return res.status(400).json({ message: 'All required fields must be filled' });
+    }
+
+    // Free plan limit: vendors without a premium subscription can keep up to
+    // 3 non-rejected items. Admins are exempt from the limit.
+    if (req.user.role === 'vendor') {
+      const vendor = await usersCollection.findOne({ _id: new ObjectId(req.user._id) });
+      if (!vendor || vendor.subscriptionPlan !== 'premium') {
+        const itemCount = await menuItemsCollection.countDocuments({
+          vendorId: req.user._id,
+          status: { $ne: 'rejected' },
+        });
+        if (itemCount >= 3) {
+          return res.status(403).json({
+            message: 'Free plan allows up to 3 active items. Upgrade to Premium for unlimited items!',
+          });
+        }
+      }
     }
 
     const newItem = {
@@ -114,6 +131,43 @@ router.delete('/:id', verifyToken, verifyRole('vendor', 'admin'), async (req, re
     res.json({ message: 'Menu item deleted' });
   } catch (error) {
     res.status(500).json({ message: 'Failed to delete item' });
+  }
+});
+
+// 6. Customer: Add a Review to a Menu Item
+router.post('/:id/reviews', verifyToken, verifyRole('customer'), async (req, res) => {
+  try {
+    const { rating, comment } = req.body;
+
+    if (!rating || !comment) {
+      return res.status(400).json({ message: 'Rating and comment are required' });
+    }
+
+    const ratingValue = Number(rating);
+    if (!ratingValue || ratingValue < 1 || ratingValue > 5) {
+      return res.status(400).json({ message: 'Rating must be a number between 1 and 5' });
+    }
+
+    const review = {
+      userId: req.user._id,
+      userName: req.user.name,
+      rating: ratingValue,
+      comment,
+      createdAt: new Date(),
+    };
+
+    const result = await menuItemsCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $push: { reviews: review } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'Menu item not found' });
+    }
+
+    res.status(201).json({ message: 'Review added', review });
+  } catch (error) {
+    res.status(400).json({ message: 'Invalid menu ID' });
   }
 });
 

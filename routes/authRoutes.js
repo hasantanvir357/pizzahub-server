@@ -87,7 +87,7 @@ router.post('/login', async (req, res) => {
       image: user.image || '',
     };
 
-    const token = jwt.sign(userPayload, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign(userPayload, process.env.JWT_SECRET, { expiresIn: '30d' });
 
     res.json({ token, user: userPayload });
   } catch (error) {

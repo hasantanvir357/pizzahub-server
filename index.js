@@ -16,7 +16,7 @@ const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SEC
 
 app.use(
   cors({
-    origin: [process.env.CLIENT_URL, 'http://localhost:3000'],
+    origin: true,
     credentials: true,
   })
 );
@@ -90,6 +90,12 @@ app.get('/', (req, res) => {
   res.send('PizzaHub Server is running!');
 });
 
-app.listen(port, () => {
-  console.log(`Server is running on port: ${port}`);
-});
+// Only bind the port during local development; on Vercel the serverless
+// function handles requests via `export default app` and must not call listen().
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(port, () => {
+    console.log(`Server is running on port: ${port}`);
+  });
+}
+
+export default app;

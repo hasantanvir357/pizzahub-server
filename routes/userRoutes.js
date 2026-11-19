@@ -7,15 +7,39 @@ import { verifyRole } from '../middlewares/verifyRole.js';
 
 const router = express.Router();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
 
-// 1. Admin: Get All Users
+// 1. Admin: Get All Users (deduplicated by lowercase email, keeping the highest-privilege account)
 router.get('/', verifyToken, verifyRole('admin'), async (req, res) => {
   try {
     const users = await usersCollection
       .find({}, { projection: { password: 0 } })
       .sort({ createdAt: -1 })
       .toArray();
-    res.json({ users });
+
+    // Deduplicate by email (case-insensitive) keeping the highest-privilege account.
+    const rolePriority = { admin: 3, vendor: 2, customer: 1 };
+    const usersByEmail = new Map();
+
+    for (const user of users) {
+      const emailKey = (user.email || '').toLowerCase();
+      const existing = usersByEmail.get(emailKey);
+      if (!existing) {
+        usersByEmail.set(emailKey, user);
+        continue;
+      }
+      const existingPriority = rolePriority[existing.role] || 0;
+      const userPriority = rolePriority[user.role] || 0;
+      if (userPriority > existingPriority) {
+        usersByEmail.set(emailKey, user);
+      }
+    }
+
+    const dedupedUsers = Array.from(usersByEmail.values()).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+
+    res.json({ users: dedupedUsers });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch users' });
   }
@@ -33,7 +57,19 @@ router.patch('/:id/role', verifyToken, verifyRole('admin'), async (req, res) => 
       return res.status(400).json({ message: 'Admins cannot change their own role' });
     }
 
-    await usersCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { role } });
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user id' });
+    }
+
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { role } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
     res.json({ message: `User role updated to ${role}` });
   } catch (error) {
     res.status(500).json({ message: 'Failed to update user role' });
@@ -99,6 +135,11 @@ router.post('/create-checkout-session', verifyToken, verifyRole('vendor'), async
       return res.status(500).json({ message: 'Stripe is not configured on the server' });
     }
 
+    const user = await usersCollection.findOne({ _id: new ObjectId(req.user._id) });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
@@ -112,14 +153,16 @@ router.post('/create-checkout-session', verifyToken, verifyRole('vendor'), async
           quantity: 1,
         },
       ],
-      success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
-      metadata: { vendorId: req.user._id },
+      success_url: `${CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${CLIENT_URL}/payment/cancel`,
+      customer_email: user.email,
+      metadata: { userId: user._id.toString(), email: user.email },
     });
 
-    res.json({ sessionId: session.id, url: session.url });
-  } catch (error) {
-    res.status(500).json({ message: 'Failed to create checkout session', error: error.message });
+    res.status(200).json({ url: session.url });
+  } catch (err) {
+    console.error('Stripe checkout error:', err);
+    res.status(500).json({ message: err.message || 'Failed to create checkout session' });
   }
 });
 

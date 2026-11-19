@@ -109,7 +109,7 @@ router.get('/me', verifyToken, async (req, res) => {
 // 4. Google Sign-In / Sign-Up (find or create user; default role: 'customer')
 router.post('/google', async (req, res) => {
   try {
-    let { email, name, image, googleId, idToken } = req.body;
+    let { email, name, image, googleId, idToken, role, restaurantName } = req.body;
 
     // If a Google ID token is provided, verify it with Google before trusting the payload.
     if (idToken) {
@@ -139,14 +139,22 @@ router.post('/google', async (req, res) => {
       return res.status(400).json({ message: 'Email is required' });
     }
 
-    const normalizedEmail = email.toLowerCase();
-    const existingUser = await usersCollection.findOne({ email: normalizedEmail });
+    const normalizedEmail = email.trim().toLowerCase();
+    const existingUser = await usersCollection.findOne({
+      email: { $regex: new RegExp('^' + normalizedEmail + '$', 'i') },
+    });
 
     let user;
     if (existingUser) {
       // Existing account: preserve their role/plan and enforce the block status.
       if (existingUser.isBlocked === true) {
         return res.status(403).json({ message: 'Your account has been blocked by Admin.' });
+      }
+      // If a vendor role was explicitly passed during sign-up but the account
+      // already exists as a customer, upgrade it to a vendor account.
+      if (role === 'vendor' && existingUser.role !== 'vendor') {
+        await usersCollection.updateOne({ _id: existingUser._id }, { $set: { role: 'vendor' } });
+        existingUser.role = 'vendor';
       }
       if (googleId && !existingUser.googleId) {
         await usersCollection.updateOne({ _id: existingUser._id }, { $set: { googleId } });
@@ -157,10 +165,13 @@ router.post('/google', async (req, res) => {
         name: name || normalizedEmail.split('@')[0],
         email: normalizedEmail,
         password: null, // Google accounts have no password
-        role: 'customer',
-        restaurantName: null,
+        role: role === 'vendor' ? 'vendor' : 'customer',
+        restaurantName:
+          role === 'vendor' ? restaurantName || `${name || normalizedEmail.split('@')[0]}'s Pizzeria` : '',
         image: image || '',
         googleId: googleId || null,
+        plan: 'free',
+        isBlocked: false,
         createdAt: new Date(),
       };
       const result = await usersCollection.insertOne(newUser);

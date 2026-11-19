@@ -142,7 +142,6 @@ router.post('/create-checkout-session', verifyToken, verifyRole('vendor'), async
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      payment_method_types: ['card'],
       line_items: [
         {
           price_data: {
@@ -166,7 +165,77 @@ router.post('/create-checkout-session', verifyToken, verifyRole('vendor'), async
   }
 });
 
-// 6. Admin: Get All Transactions (read-only, newest first)
+// 6. Any Vendor: Immediately verify a completed Stripe checkout session.
+// The webhook is authoritative but can lag (or never arrive in dev/test), so the
+// client calls this right after redirecting back to the app to finalize the
+// upgrade without waiting on an async webhook.
+router.post('/verify-subscription', verifyToken, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ message: 'Stripe is not configured on the server' });
+    }
+
+    const { sessionId } = req.body;
+    if (!sessionId || typeof sessionId !== 'string') {
+      return res.status(400).json({ message: 'sessionId is required' });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    // Only the vendor who started this checkout may finalize it, which stops a
+    // user from claiming premium off someone else's paid session id.
+    if (
+      session.metadata?.userId &&
+      String(session.metadata.userId) !== String(req.user._id)
+    ) {
+      return res.status(403).json({ message: 'This checkout session does not belong to you' });
+    }
+
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({ success: false, message: 'Payment not completed' });
+    }
+
+    const user = await usersCollection.findOne({ _id: new ObjectId(req.user._id) });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // `subscriptionPlan` is what the menu free-plan limits and the Stripe webhook
+    // read; `plan` mirrors it for clients that read that field.
+    await usersCollection.updateOne(
+      { _id: new ObjectId(req.user._id) },
+      { $set: { plan: 'premium', subscriptionPlan: 'premium' } }
+    );
+
+    // The webhook inserts the same transaction keyed by stripeSessionId, so only
+    // insert when it hasn't landed yet to avoid a duplicate premium record.
+    const existing = await transactionsCollection.findOne({ stripeSessionId: session.id });
+    if (!existing) {
+      await transactionsCollection.insertOne({
+        vendorId: String(user._id),
+        vendorName: user.name || user.restaurantName || 'Unknown Vendor',
+        plan: 'Premium',
+        amount: 19.99,
+        currency: 'USD',
+        stripeSessionId: session.id,
+        status: 'paid',
+        createdAt: new Date(),
+      });
+    }
+
+    const updatedUser = await usersCollection.findOne(
+      { _id: new ObjectId(req.user._id) },
+      { projection: { password: 0 } }
+    );
+
+    res.json({ success: true, user: updatedUser });
+  } catch (error) {
+    console.error('Verify subscription error:', error);
+    res.status(500).json({ message: error.message || 'Failed to verify subscription' });
+  }
+});
+
+// 7. Admin: Get All Transactions (read-only, newest first)
 router.get('/transactions', verifyToken, verifyRole('admin'), async (req, res) => {
   try {
     const transactions = await transactionsCollection

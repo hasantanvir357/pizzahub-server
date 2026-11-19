@@ -106,4 +106,82 @@ router.get('/me', verifyToken, async (req, res) => {
   }
 });
 
+// 4. Google Sign-In / Sign-Up (find or create user; default role: 'customer')
+router.post('/google', async (req, res) => {
+  try {
+    let { email, name, image, googleId, idToken } = req.body;
+
+    // If a Google ID token is provided, verify it with Google before trusting the payload.
+    if (idToken) {
+      const tokenInfoRes = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
+      );
+      if (!tokenInfoRes.ok) {
+        return res.status(401).json({ message: 'Invalid Google ID token' });
+      }
+      const tokenInfo = await tokenInfoRes.json();
+
+      const expectedAud = process.env.GOOGLE_CLIENT_ID;
+      if (expectedAud && tokenInfo.aud !== expectedAud) {
+        return res.status(401).json({ message: 'Google token audience mismatch' });
+      }
+      if (tokenInfo.email_verified === 'false') {
+        return res.status(401).json({ message: 'Google email is not verified' });
+      }
+
+      email = tokenInfo.email;
+      name = tokenInfo.name || name;
+      image = tokenInfo.picture || image;
+      googleId = tokenInfo.sub;
+    }
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const normalizedEmail = email.toLowerCase();
+    const existingUser = await usersCollection.findOne({ email: normalizedEmail });
+
+    let user;
+    if (existingUser) {
+      // Existing account: preserve their role/plan and enforce the block status.
+      if (existingUser.isBlocked === true) {
+        return res.status(403).json({ message: 'Your account has been blocked by Admin.' });
+      }
+      if (googleId && !existingUser.googleId) {
+        await usersCollection.updateOne({ _id: existingUser._id }, { $set: { googleId } });
+      }
+      user = existingUser;
+    } else {
+      const newUser = {
+        name: name || normalizedEmail.split('@')[0],
+        email: normalizedEmail,
+        password: null, // Google accounts have no password
+        role: 'customer',
+        restaurantName: null,
+        image: image || '',
+        googleId: googleId || null,
+        createdAt: new Date(),
+      };
+      const result = await usersCollection.insertOne(newUser);
+      user = { ...newUser, _id: result.insertedId };
+    }
+
+    const userPayload = {
+      _id: user._id.toString(),
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      restaurantName: user.restaurantName || null,
+      image: user.image || '',
+    };
+
+    const token = jwt.sign(userPayload, process.env.JWT_SECRET, { expiresIn: '30d' });
+
+    res.json({ token, user: userPayload });
+  } catch (error) {
+    res.status(500).json({ message: 'Google sign-in failed', error: error.message });
+  }
+});
+
 export default router;

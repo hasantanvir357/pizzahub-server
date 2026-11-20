@@ -53,12 +53,13 @@ router.post(
 
       const { quantity, size, paymentMethod } = req.body;
       // Accept any of the field names used by the different clients.
-      const menuId = req.body.menuId || req.body.menuItemId || req.body.pizzaId;
+      const menuId = req.body.menuId || req.body.itemId || req.body.menuItemId || req.body.pizzaId;
       const deliveryAddress = req.body.deliveryAddress || req.body.address;
+      const deliveryDate = req.body.deliveryDate || req.body.date;
       const phone = req.body.phone || req.body.customerPhone;
       const bodyTotalPrice = req.body.totalPrice ?? req.body.price;
 
-      if (!menuId || !quantity || !deliveryAddress || !phone) {
+      if (!menuId || !quantity || !deliveryAddress || !deliveryDate || !phone) {
         return res.status(400).json({ message: 'Please fill all delivery and order fields' });
       }
 
@@ -89,6 +90,38 @@ router.post(
           : computedTotal;
 
       const vendorId = menuItem ? await resolveVendorId(menuItem) : req.body.vendorId || null;
+      const menuItemId = menuItem ? menuItem._id.toString() : String(menuId);
+
+      // A customer may only have one active order for a given pizza on a given
+      // delivery date. Match by customer id OR email, and by either menu/item id
+      // field so legacy and newer orders are both covered.
+      const customerIdValues = [req.user._id, String(req.user._id)];
+      if (ObjectId.isValid(req.user._id)) customerIdValues.push(new ObjectId(req.user._id));
+
+      const pizzaIdValues = [menuItemId];
+      if (ObjectId.isValid(menuItemId)) pizzaIdValues.push(new ObjectId(menuItemId));
+
+      const deliveryDateValues = [deliveryDate];
+      const parsedDeliveryDate = new Date(deliveryDate);
+      if (!Number.isNaN(parsedDeliveryDate.getTime())) deliveryDateValues.push(parsedDeliveryDate);
+
+      const customerMatch = [{ customerId: { $in: customerIdValues } }];
+      if (req.user.email) customerMatch.push({ customerEmail: req.user.email });
+
+      const duplicateOrder = await ordersCollection.findOne({
+        $and: [
+          { $or: customerMatch },
+          { status: { $in: ['Pending', 'Accepted', 'pending', 'accepted'] } },
+          { $or: [{ menuId: { $in: pizzaIdValues } }, { itemId: { $in: pizzaIdValues } }] },
+          { deliveryDate: { $in: deliveryDateValues } },
+        ],
+      });
+
+      if (duplicateOrder) {
+        return res.status(400).json({
+          message: 'You already have an active order for this pizza on the selected delivery date.',
+        });
+      }
 
       const newOrder = {
         customerId: req.user._id,
@@ -96,13 +129,15 @@ router.post(
         customerEmail: req.user.email,
         vendorId,
         restaurantName: menuItem?.restaurantName || req.body.restaurantName || null,
-        menuId: menuItem ? menuItem._id.toString() : menuId,
+        menuId: menuItemId,
+        itemId: menuItemId,
         pizzaName,
         pizzaImage,
         size: size || 'Regular',
         quantity: qty,
         totalPrice,
         deliveryAddress,
+        deliveryDate,
         phone,
         status: 'pending', // pending -> preparing -> delivered -> cancelled
         createdAt: new Date(),
@@ -177,7 +212,7 @@ router.patch('/:id/status', verifyToken, verifyRole('vendor', 'admin'), async (r
   }
 });
 
-// 5. Customer (own pending order) / Vendor / Admin: Cancel Order
+// 5. Customer: Cancel Own Pending Order
 router.patch('/:id/cancel', verifyToken, async (req, res) => {
   try {
     if (!ObjectId.isValid(req.params.id)) {
@@ -189,20 +224,17 @@ router.patch('/:id/cancel', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    if (order.status === 'cancelled') {
-      return res.status(400).json({ message: 'Order is already cancelled' });
-    }
+    // Only the customer who placed the order may use this endpoint.
+    const isOwner =
+      (req.user._id != null && order.customerId != null && String(order.customerId) === String(req.user._id)) ||
+      (!!req.user.email && !!order.customerEmail && order.customerEmail === req.user.email);
 
-    const isCustomer = String(order.customerId) === String(req.user._id);
-    const isVendor = order.vendorId != null && String(order.vendorId) === String(req.user._id);
-    const isAdmin = req.user.role === 'admin';
-
-    if (!isAdmin && !isVendor && !isCustomer) {
+    if (!isOwner) {
       return res.status(403).json({ message: 'Not authorized to cancel this order' });
     }
 
-    // Customers may only cancel while the order is still pending.
-    if (!isAdmin && !isVendor && order.status !== 'pending') {
+    // Accepted / rejected / cancelled (and any non-pending) orders are final.
+    if (String(order.status || '').toLowerCase() !== 'pending') {
       return res.status(400).json({ message: 'Only pending orders can be cancelled' });
     }
 
@@ -211,14 +243,14 @@ router.patch('/:id/cancel', verifyToken, async (req, res) => {
       { _id: new ObjectId(req.params.id) },
       {
         $set: {
-          status: 'cancelled',
-          cancelReason: cancelReason || 'No reason provided',
-          cancelledBy: req.user.role,
+          status: 'Cancelled',
+          cancelReason: cancelReason || 'Cancelled by customer',
+          cancelledBy: req.user.role || 'customer',
         },
       }
     );
 
-    res.json({ message: 'Order cancelled successfully', status: 'cancelled' });
+    res.json({ message: 'Order cancelled successfully', status: 'Cancelled' });
   } catch (error) {
     res.status(500).json({ message: 'Failed to cancel order', error: error.message });
   }

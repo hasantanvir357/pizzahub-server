@@ -6,21 +6,35 @@ import { verifyRole } from '../middlewares/verifyRole.js';
 
 const router = express.Router();
 
-// 1. Public: Get Approved Menu Items (with Search, Category, Sort & Limit)
+// 1. Public: Get Approved Menu Items (with Search, Category, Location, Sort & Limit)
 router.get('/', async (req, res) => {
   try {
-    const { search, category, sort, limit } = req.query;
-    const query = { status: 'approved' };
+    const { search, category, location, sort, limit } = req.query;
 
-    if (category && category !== 'All') {
+    // Public requests only ever see approved items that are still active.
+    // `$ne: false` keeps legacy items (without an explicit flag) visible while
+    // hiding anything a vendor/admin has explicitly deactivated.
+    const query = {
+      status: 'approved',
+      isActive: { $ne: false },
+      active: { $ne: false },
+    };
+
+    if (category && String(category).toLowerCase() !== 'all') {
       query.category = category;
     }
 
+    if (location) {
+      query.location = { $regex: location, $options: 'i' };
+    }
+
     if (search) {
+      const searchRegex = { $regex: search, $options: 'i' };
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } },
-        { restaurantName: { $regex: search, $options: 'i' } },
+        { itemName: searchRegex },
+        { name: searchRegex },
+        { description: searchRegex },
+        { restaurantName: searchRegex },
       ];
     }
 

@@ -1,2 +1,6 @@
 node_modules
 .env
+
+# Temporary local admin/e2e helper scripts
+seed-e2e-*.mjs
+inspect-admin.mjs

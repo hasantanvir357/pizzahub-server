@@ -7,6 +7,23 @@ import { verifyToken } from '../middlewares/verifyToken.js';
 
 const router = express.Router();
 
+/**
+ * Sign a compact identity-only JWT.
+ *
+ * The avatar (`image`) is deliberately excluded: base64 data-URI avatars can be
+ * many KB long (the seeded admin's is ~9.4KB), which pushed the signed token
+ * past the browser's ~4KB per-cookie limit. `document.cookie` writes over that
+ * limit are silently rejected, leaving the account without a `pizzahub_token`
+ * cookie — the client proxy then treated the admin as signed out and bounced
+ * every /dashboard navigation to /sign-in. Identity claims only keeps the
+ * cookie small enough to actually be stored.
+ */
+function signToken(userPayload) {
+  const claims = { ...userPayload };
+  delete claims.image;
+  return jwt.sign(claims, process.env.JWT_SECRET, { expiresIn: '30d' });
+}
+
 // 1. Register (Customer or Vendor only)
 router.post('/register', async (req, res) => {
   try {
@@ -49,7 +66,7 @@ router.post('/register', async (req, res) => {
       image: newUser.image,
     };
 
-    const token = jwt.sign(userPayload, process.env.JWT_SECRET, { expiresIn: '30d' });
+    const token = signToken(userPayload);
 
     res.status(201).json({ token, user: userPayload });
   } catch (error) {
@@ -87,7 +104,7 @@ router.post('/login', async (req, res) => {
       image: user.image || '',
     };
 
-    const token = jwt.sign(userPayload, process.env.JWT_SECRET, { expiresIn: '30d' });
+    const token = signToken(userPayload);
 
     res.json({ token, user: userPayload });
   } catch (error) {
@@ -187,7 +204,7 @@ router.post('/google', async (req, res) => {
       image: user.image || '',
     };
 
-    const token = jwt.sign(userPayload, process.env.JWT_SECRET, { expiresIn: '30d' });
+    const token = signToken(userPayload);
 
     res.json({ token, user: userPayload });
   } catch (error) {

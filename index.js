@@ -12,17 +12,11 @@ import userRoutes from './routes/userRoutes.js';
 
 const app = express();
 
-// CORS must be the very first middleware — before any other middleware,
-// webhook, or route — so every response (incl. preflight/404) carries the
-// correct headers in local dev AND on Vercel.
 app.use(cors({ origin: true, credentials: true }));
 
 const port = process.env.PORT || 5000;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
-// Cached MongoDB connection promise. connectDB() is invoked at most once per
-// process; warm serverless invocations await the same promise instead of
-// reconnecting on every request.
 let cachedClient = null;
 
 function ensureDbConnection() {
@@ -35,10 +29,6 @@ function ensureDbConnection() {
   return cachedClient;
 }
 
-// Await the (cached) MongoDB connection BEFORE any /api/* route handler runs.
-// On a cold serverless start this guarantees the DB pool is ready before the
-// auth/menu/order/user controllers execute; failures return 503 instead of
-// letting routes hang.
 app.use(async (req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();
   try {
@@ -50,8 +40,6 @@ app.use(async (req, res, next) => {
   }
 });
 
-// Stripe Webhook: mounted BEFORE express.json() so the raw request body is
-// preserved for signature verification via the Stripe-Signature header.
 app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
     return res.status(503).json({ message: 'Stripe webhook is not configured' });
@@ -78,10 +66,7 @@ app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async
       if (vendorId && ObjectId.isValid(vendorId)) {
         const vendor = await usersCollection.findOne({ _id: new ObjectId(vendorId) });
 
-        await usersCollection.updateOne(
-          { _id: new ObjectId(vendorId) },
-          { $set: { subscriptionPlan: 'premium' } }
-        );
+        await usersCollection.updateOne({ _id: new ObjectId(vendorId) }, { $set: { subscriptionPlan: 'premium' } });
 
         await transactionsCollection.insertOne({
           vendorId,
@@ -104,18 +89,13 @@ app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async
 
 app.use(express.json());
 
-// Connect to MongoDB & Seed 12 Initial Menu Items — runs unconditionally at
-// startup (local dev AND Vercel) through the SAME cached promise the /api
-// middleware awaits, so connectDB() never opens a second connection.
 ensureDbConnection()
   .then(() => seedMenuIfEmpty())
   .catch((err) => console.error('Initial MongoDB connection failed:', err.message));
 
-// API Routes — registered unconditionally at module load so they exist in
-// both local dev AND Vercel production (only app.listen below is gated).
 app.use('/api/auth', authRoutes);
 app.use('/api/menus', menuRoutes);
-app.use('/api/menu', menuRoutes); // keep the singular path working for existing callers
+app.use('/api/menu', menuRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/users', userRoutes);
 
@@ -123,10 +103,6 @@ app.get('/', (req, res) => {
   res.send('PizzaHub Server is running!');
 });
 
-// ONLY the port bind is gated — DB init (connectDB) and all route
-// registrations above run unconditionally at module load, so they execute in
-// local dev AND Vercel production. On Vercel, `export default app` serves
-// requests; calling listen() there would make the serverless function hang.
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`Server is running on port: ${port}`);
